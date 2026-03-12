@@ -9,8 +9,39 @@ use glib;
 use std::path::PathBuf;
 use std::fs::File;
 use std::io::BufReader;
-use rodio::{Decoder, OutputStream, Sink, OutputStreamHandle};
+use rodio::{buffer::SamplesBuffer, Decoder, OutputStream, Sink, OutputStreamHandle, Source};
 use std::sync::{Arc, Mutex};
+use std::f32::consts::PI;
+
+// Traite un tampon complet : simple passe-bas (bass) + passe-haut (aigue)
+fn apply_eq(
+    samples: Vec<f32>,
+    channels: u16,
+    sample_rate: u32,
+    bass_gain: f32,
+    treble_gain: f32,
+) -> Vec<f32> {
+    let cutoff_hz = 200.0_f32;
+    let dt = 1.0 / sample_rate as f32;
+    let rc = 1.0 / (2.0 * PI * cutoff_hz);
+    let alpha = dt / (rc + dt);
+
+    let mut state = vec![0.0f32; channels as usize];
+    let mut out = Vec::with_capacity(samples.len());
+
+    for (i, s) in samples.into_iter().enumerate() {
+        let ch = i % state.len();
+        let prev = state[ch];
+        let low = prev + alpha * (s - prev);
+        state[ch] = low;
+
+        let high = s - low;
+        let mixed = s + bass_gain * low + treble_gain * high;
+        out.push(mixed.clamp(-1.0, 1.0));
+    }
+
+    out
+}
 
 #[allow(dead_code)]
 pub fn run() {
@@ -105,12 +136,48 @@ pub fn create_main_window() -> Window {
 
 fn create_track_row(container: &Box, path: PathBuf, handle: Option<&Arc<OutputStreamHandle>>, all_sinks: &Arc<Mutex<Vec<Arc<Mutex<Sink>>>>>) {
     let track_box = Box::new(Orientation::Horizontal, 10);
+    let controls_column = Box::new(Orientation::Vertical, 5);
+
+    // Ligne principale des controles
+    let buttons_row = Box::new(Orientation::Horizontal, 5);
     let play_btn = Button::with_label("▶");
     let mute_btn = Button::with_label("M"); // Bouton Mute individuel
+    let eq_btn = Button::with_label("Egaliseur"); // Bouton Egaliseur à droite du mute
+
+    // Ligne d'EQ (masquee au depart)
+    let bass_controls_row = Box::new(Orientation::Horizontal, 5);
+    let bass_label = Label::new(Some("Bass"));
+    let bass_minus_btn = Button::with_label("-");
+    let bass_value_label = Label::new(Some("0"));
+    let bass_plus_btn = Button::with_label("+");
+    let bass_validate_btn = Button::with_label("Valider");
+    bass_controls_row.pack_start(&bass_label, false, false, 0);
+    bass_controls_row.pack_start(&bass_minus_btn, false, false, 0);
+    bass_controls_row.pack_start(&bass_value_label, false, false, 0);
+    bass_controls_row.pack_start(&bass_plus_btn, false, false, 0);
+    bass_controls_row.pack_start(&bass_validate_btn, false, false, 0);
+    bass_controls_row.hide();
+
+    let treble_controls_row = Box::new(Orientation::Horizontal, 5);
+    let treble_label = Label::new(Some("Aigue"));
+    let treble_minus_btn = Button::with_label("-");
+    let treble_value_label = Label::new(Some("0"));
+    let treble_plus_btn = Button::with_label("+");
+    let treble_validate_btn = Button::with_label("Valider");
+    treble_controls_row.pack_start(&treble_label, false, false, 0);
+    treble_controls_row.pack_start(&treble_minus_btn, false, false, 0);
+    treble_controls_row.pack_start(&treble_value_label, false, false, 0);
+    treble_controls_row.pack_start(&treble_plus_btn, false, false, 0);
+    treble_controls_row.pack_start(&treble_validate_btn, false, false, 0);
+    treble_controls_row.hide();
     
     let cursor_x = Arc::new(Mutex::new(0.0));
     let current_progress = Arc::new(Mutex::new(0.0));
     let is_playing = Arc::new(Mutex::new(false));
+    let bass_level = Arc::new(Mutex::new(0_i32));
+    let bass_gain = Arc::new(Mutex::new(0.0f32));
+    let treble_level = Arc::new(Mutex::new(0_i32));
+    let treble_gain = Arc::new(Mutex::new(0.0f32));
 
     if let Some(h) = handle {
         if let Ok(sink) = Sink::try_new(h) {
@@ -132,6 +199,68 @@ fn create_track_row(container: &Box, path: PathBuf, handle: Option<&Arc<OutputSt
                     sink.set_volume(1.0);
                     btn.set_label("M");
                 }
+            });
+
+            // AFFICHAGE EQ
+            let eq_row_toggle_bass = bass_controls_row.clone();
+            let eq_row_toggle_treble = treble_controls_row.clone();
+            eq_btn.connect_clicked(move |_| {
+                let visible = eq_row_toggle_bass.is_visible();
+                if visible {
+                    eq_row_toggle_bass.hide();
+                    eq_row_toggle_treble.hide();
+                } else {
+                    eq_row_toggle_bass.show_all();
+                    eq_row_toggle_treble.show_all();
+                }
+            });
+
+            // REGLAGE BASSES
+            let bass_label_for_minus = bass_value_label.clone();
+            let bass_label_for_plus = bass_value_label.clone();
+            let bass_level_minus = Arc::clone(&bass_level);
+            let bass_level_plus = Arc::clone(&bass_level);
+            let bass_gain_minus = Arc::clone(&bass_gain);
+            let bass_gain_plus = Arc::clone(&bass_gain);
+
+            bass_minus_btn.connect_clicked(move |_| {
+                let mut lvl = bass_level_minus.lock().unwrap();
+                if *lvl > -10 { *lvl -= 1; }
+                let gain = (*lvl as f32) * 0.1;
+                *bass_gain_minus.lock().unwrap() = gain;
+                bass_label_for_minus.set_text(&lvl.to_string());
+            });
+
+            bass_plus_btn.connect_clicked(move |_| {
+                let mut lvl = bass_level_plus.lock().unwrap();
+                if *lvl < 10 { *lvl += 1; }
+                let gain = (*lvl as f32) * 0.1;
+                *bass_gain_plus.lock().unwrap() = gain;
+                bass_label_for_plus.set_text(&lvl.to_string());
+            });
+
+            // REGLAGE AIGUES
+            let treble_label_for_minus = treble_value_label.clone();
+            let treble_label_for_plus = treble_value_label.clone();
+            let treble_level_minus = Arc::clone(&treble_level);
+            let treble_level_plus = Arc::clone(&treble_level);
+            let treble_gain_minus = Arc::clone(&treble_gain);
+            let treble_gain_plus = Arc::clone(&treble_gain);
+
+            treble_minus_btn.connect_clicked(move |_| {
+                let mut lvl = treble_level_minus.lock().unwrap();
+                if *lvl > -10 { *lvl -= 1; }
+                let gain = (*lvl as f32) * 0.1;
+                *treble_gain_minus.lock().unwrap() = gain;
+                treble_label_for_minus.set_text(&lvl.to_string());
+            });
+
+            treble_plus_btn.connect_clicked(move |_| {
+                let mut lvl = treble_level_plus.lock().unwrap();
+                if *lvl < 10 { *lvl += 1; }
+                let gain = (*lvl as f32) * 0.1;
+                *treble_gain_plus.lock().unwrap() = gain;
+                treble_label_for_plus.set_text(&lvl.to_string());
             });
 
             // NAVIGATION AU CLIC
@@ -198,14 +327,104 @@ fn create_track_row(container: &Box, path: PathBuf, handle: Option<&Arc<OutputSt
             let file_path = path.to_str().unwrap().to_string();
             let s_play = Arc::clone(&sink_arc);
             let p_state = Arc::clone(&is_playing);
+            let bass_gain_for_play = Arc::clone(&bass_gain);
+            let treble_gain_for_play = Arc::clone(&treble_gain);
+
+            // Données partagées pour les boutons "Valider"
+            let path_for_validate_bass = file_path.clone();
+            let path_for_validate_treble = file_path.clone();
+
+            let s_validate_bass = Arc::clone(&sink_arc);
+            let s_validate_treble = Arc::clone(&sink_arc);
+
+            let bass_gain_for_validate_bass = Arc::clone(&bass_gain);
+            let treble_gain_for_validate_bass = Arc::clone(&treble_gain);
+
+            let bass_gain_for_validate_treble = Arc::clone(&bass_gain);
+            let treble_gain_for_validate_treble = Arc::clone(&treble_gain);
+
+            let progress_for_validate_bass = Arc::clone(&current_progress);
+            let progress_for_validate_treble = Arc::clone(&current_progress);
+
+            let playing_state_for_validate_bass = Arc::clone(&is_playing);
+            let playing_state_for_validate_treble = Arc::clone(&is_playing);
+
+            let play_btn_for_validate_bass = play_btn.clone();
+            let play_btn_for_validate_treble = play_btn.clone();
+
+            let da_for_validate_bass = drawing_area.clone();
+            let da_for_validate_treble = drawing_area.clone();
+
+            // VALIDER BASSES
+            bass_validate_btn.connect_clicked(move |_| {
+                if let Ok(f) = File::open(&path_for_validate_bass) {
+                    if let Ok(decoder) = Decoder::new(BufReader::new(f)) {
+                        let source = decoder.convert_samples::<f32>();
+                        let channels = source.channels();
+                        let rate = source.sample_rate();
+                        let bass_gain_now = *bass_gain_for_validate_bass.lock().unwrap();
+                        let treble_gain_now = *treble_gain_for_validate_bass.lock().unwrap();
+                        let raw: Vec<f32> = source.collect();
+                        let processed = apply_eq(raw, channels, rate, bass_gain_now, treble_gain_now);
+                        let buffer = SamplesBuffer::new(channels, rate, processed);
+
+                        let sink = s_validate_bass.lock().unwrap();
+                        sink.pause();
+                        sink.clear();
+                        sink.append(buffer);
+                        sink.play();
+
+                        *progress_for_validate_bass.lock().unwrap() = 0.0;
+                        *playing_state_for_validate_bass.lock().unwrap() = true;
+                        play_btn_for_validate_bass.set_label("⏸");
+                        da_for_validate_bass.queue_draw();
+                    }
+                }
+            });
+
+            // VALIDER AIGUES
+            treble_validate_btn.connect_clicked(move |_| {
+                if let Ok(f) = File::open(&path_for_validate_treble) {
+                    if let Ok(decoder) = Decoder::new(BufReader::new(f)) {
+                        let source = decoder.convert_samples::<f32>();
+                        let channels = source.channels();
+                        let rate = source.sample_rate();
+                        let bass_gain_now = *bass_gain_for_validate_treble.lock().unwrap();
+                        let treble_gain_now = *treble_gain_for_validate_treble.lock().unwrap();
+                        let raw: Vec<f32> = source.collect();
+                        let processed = apply_eq(raw, channels, rate, bass_gain_now, treble_gain_now);
+                        let buffer = SamplesBuffer::new(channels, rate, processed);
+
+                        let sink = s_validate_treble.lock().unwrap();
+                        sink.pause();
+                        sink.clear();
+                        sink.append(buffer);
+                        sink.play();
+
+                        *progress_for_validate_treble.lock().unwrap() = 0.0;
+                        *playing_state_for_validate_treble.lock().unwrap() = true;
+                        play_btn_for_validate_treble.set_label("⏸");
+                        da_for_validate_treble.queue_draw();
+                    }
+                }
+            });
+
             play_btn.connect_clicked(move |btn| {
                 let sink = s_play.lock().unwrap();
                 let mut playing = p_state.lock().unwrap();
                 if btn.get_label().unwrap() == "▶" {
                     if sink.empty() {
                         if let Ok(f) = File::open(&file_path) {
-                            if let Ok(d) = Decoder::new(BufReader::new(f)) {
-                                sink.append(d);
+                            if let Ok(decoder) = Decoder::new(BufReader::new(f)) {
+                                let source = decoder.convert_samples::<f32>();
+                                let channels = source.channels();
+                                let rate = source.sample_rate();
+                                let bass_now = *bass_gain_for_play.lock().unwrap();
+                                let treble_now = *treble_gain_for_play.lock().unwrap();
+                                let raw: Vec<f32> = source.collect();
+                                let processed = apply_eq(raw, channels, rate, bass_now, treble_now);
+                                let buffer = SamplesBuffer::new(channels, rate, processed);
+                                sink.append(buffer);
                             }
                         }
                     }
@@ -215,8 +434,15 @@ fn create_track_row(container: &Box, path: PathBuf, handle: Option<&Arc<OutputSt
                 }
             });
 
-            track_box.pack_start(&play_btn, false, false, 5);
-            track_box.pack_start(&mute_btn, false, false, 5); // Ajout du bouton Mute dans le layout
+            buttons_row.pack_start(&play_btn, false, false, 0);
+            buttons_row.pack_start(&mute_btn, false, false, 0);
+            buttons_row.pack_start(&eq_btn, false, false, 0);
+
+            controls_column.pack_start(&buttons_row, false, false, 0);
+            controls_column.pack_start(&bass_controls_row, false, false, 0);
+            controls_column.pack_start(&treble_controls_row, false, false, 0);
+
+            track_box.pack_start(&controls_column, false, false, 5);
             track_box.pack_start(&drawing_area, true, true, 5);
         }
     }
@@ -225,4 +451,6 @@ fn create_track_row(container: &Box, path: PathBuf, handle: Option<&Arc<OutputSt
     track_box.pack_start(&label, false, false, 5);
     container.pack_start(&track_box, false, false, 5);
     container.show_all();
+    bass_controls_row.hide(); // Reste cache tant qu'on n'a pas clique sur Egaliseur
+    treble_controls_row.hide();
 }

@@ -12,21 +12,36 @@ use std::io::BufReader;
 use rodio::{Decoder, OutputStream, Sink, OutputStreamHandle};
 use std::sync::{Arc, Mutex};
 
+#[allow(dead_code)]
 pub fn run() {
     if gtk::init().is_err() { return; }
 
-    let audio_data = OutputStream::try_default().ok();
-    let (_stream, handle) = match audio_data {
-        Some((s, h)) => (Some(s), Some(Arc::new(h))),
-        None => (None, None)
-    };
+    let window = create_main_window();
+    window.show_all();
+    gtk::main();
+}
 
+/// Construit la fenêtre principale (interface DAW) sans lancer gtk::main().
+/// Utile pour l'intégrer à un écran d'accueil déjà initialisé.
+pub fn create_main_window() -> Window {
     let settings = Settings::get_default().unwrap();
     settings.set_property_gtk_application_prefer_dark_theme(true);
 
     let window = Window::new(WindowType::Toplevel);
     window.set_title("MixRust - Professional DAW");
     window.set_default_size(1100, 700);
+
+    let audio_data = OutputStream::try_default().ok();
+    let (_stream, handle) = match audio_data {
+        Some((s, h)) => (Some(s), Some(Arc::new(h))),
+        None => (None, None),
+    };
+
+    // Conserve le stream pour éviter qu'il soit libéré pendant la durée de vie de la fenêtre.
+    if let Some(stream) = _stream {
+        // Stocke le stream sur la fenêtre pour garder la sortie audio vivante.
+        unsafe { window.set_data("mixrust_output_stream", stream); }
+    }
 
     let main_vbox = Box::new(Orientation::Vertical, 0);
     window.add(&main_vbox);
@@ -85,8 +100,7 @@ pub fn run() {
     });
 
     window.connect_delete_event(|_, _| { gtk::main_quit(); Inhibit(false) });
-    window.show_all();
-    gtk::main();
+    window
 }
 
 fn create_track_row(container: &Box, path: PathBuf, handle: Option<&Arc<OutputStreamHandle>>, all_sinks: &Arc<Mutex<Vec<Arc<Mutex<Sink>>>>>) {

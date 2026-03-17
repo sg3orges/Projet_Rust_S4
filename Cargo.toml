@@ -2,8 +2,10 @@
 name = "mixrust"
 version = "0.1.0"
 edition = "2021"
+
 [dependencies]
 gtk = { version = "0.9", features = ["v3_24"] }
 gdk = "0.13"
 glib = "0.10"
 rodio = "0.17"
+hound = "3.5"

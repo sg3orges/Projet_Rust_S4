@@ -1,8 +1,9 @@
 use gtk::prelude::*;
 use gtk::{
     Adjustment, FileChooserAction, FileChooserDialog, ResponseType,
-    Window, WindowType, Box, Orientation, Button, Label, 
-    ScrolledWindow, Toolbar, ToolButton, Settings, DrawingArea, Scale
+    Window, WindowType, Box, Orientation, Button, Label,
+    ScrolledWindow, Toolbar, ToolButton, Settings, DrawingArea, Scale,
+    CssProvider, StyleContext
 };
 use gdk::EventMask;
 use glib; 
@@ -17,6 +18,7 @@ use hound;
 use std::error::Error;
 use std::fs;
 use std::time::Instant;
+use gdk::Screen;
 
 
 // --- PROCESSEUR MULTI-EFFETS ---
@@ -43,16 +45,44 @@ struct RecordedEvent {
 struct RecordingState {
     active: bool,
     start_instant: Option<Instant>,
+    session_duration_secs: f64,
     events: Vec<RecordedEvent>,
 }
 
-impl RecordingState {
-    fn new() -> Self {
-        Self {
+impl RecordingState 
+{
+    fn new() -> Self 
+    {
+        Self 
+        {
             active: false,
             start_instant: None,
+            session_duration_secs: 0.0,
             events: Vec::new(),
         }
+    }
+}
+fn load_recording_css() {
+    let provider = CssProvider::new();
+
+    provider
+        .load_from_data(b"#rec-start-recording.recording 
+        {
+            background: #c62828;
+            color: white;
+            border-radius: 6px;
+            font-weight: bold;
+        }
+
+        #rec-start-recording.recording label 
+        {
+            color: white;
+            font-weight: bold;
+        }",).expect("Impossible de charger le CSS");
+
+    if let Some(screen) = Screen::get_default() 
+    {
+        StyleContext::add_provider_for_screen(&screen, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,);
     }
 }
 fn start_recording_session(recording_state: &Arc<Mutex<RecordingState>>) {
@@ -62,11 +92,28 @@ fn start_recording_session(recording_state: &Arc<Mutex<RecordingState>>) {
     state.events.clear();
     println!("Enregistrement démarré");
 }
-fn stop_recording_session(recording_state: &Arc<Mutex<RecordingState>>) {
+fn stop_recording_session(recording_state: &Arc<Mutex<RecordingState>>) 
+{
     let mut state = recording_state.lock().unwrap();
+
+    if let Some(start) = state.start_instant {
+        state.session_duration_secs = start.elapsed().as_secs_f64();
+    } else {
+        state.session_duration_secs = 0.0;
+    }
+
     state.active = false;
     state.start_instant = None;
-    println!("Enregistrement arrêté");
+
+    println!(
+        "Enregistrement arrêté (durée session = {:.2}s)",
+        state.session_duration_secs
+    );
+}
+fn get_session_duration(recording_state: &Arc<Mutex<RecordingState>>) -> f64 
+{
+    let state = recording_state.lock().unwrap();
+    state.session_duration_secs
 }
 fn record_play_event(
     recording_state: &Arc<Mutex<RecordingState>>,
@@ -167,6 +214,7 @@ fn write_wav_file(
 }
 fn export_recorded_session(
     events: &[RecordedEvent],
+    session_duration_secs: f64,
     output_path: &PathBuf,
 ) -> Result<(), std::boxed::Box<dyn std::error::Error>> {
     if events.is_empty() {
@@ -180,7 +228,7 @@ fn export_recorded_session(
     let mut total_len: usize = 0;
 
     for event in events {
-        let (samples, channels, sample_rate) = render_track_with_effects(
+        let (mut samples, channels, sample_rate) = render_track_with_effects(
             &event.path,
             event.bass_gain,
             event.disto_on,
@@ -188,30 +236,63 @@ fn export_recorded_session(
             event.volume,
         )?;
 
-        if reference_channels.is_none() {
+        if reference_channels.is_none() 
+        {
             reference_channels = Some(channels);
         }
-        if reference_sample_rate.is_none() {
+
+        if reference_sample_rate.is_none() 
+        {
             reference_sample_rate = Some(sample_rate);
         }
 
         if Some(channels) != reference_channels || Some(sample_rate) != reference_sample_rate {
-            return Err("Toutes les pistes doivent avoir le même sample_rate et le même nombre de canaux".into());
+            return Err("Toutes les pistes doivent avoir le même sample_rate et le même nombre de canaux".into(),);
         }
 
-        let offset_samples =
+        let channels_usize = channels as usize;
+
+        let remaining_secs = session_duration_secs - event.start_offset_secs;
+        if remaining_secs <= 0.0 
+        {
+            continue;
+        }
+
+        let max_samples_for_session =
+            (remaining_secs * sample_rate as f64 * channels as f64) as usize;
+
+        let aligned_max_samples =
+            (max_samples_for_session / channels_usize) * channels_usize;
+
+        if samples.len() > aligned_max_samples 
+        {
+            samples.truncate(aligned_max_samples);
+        }
+
+        let raw_offset_samples =
             (event.start_offset_secs * sample_rate as f64 * channels as f64) as usize;
 
+        let offset_samples =
+            (raw_offset_samples / channels_usize) * channels_usize;
+
         let end_len = offset_samples + samples.len();
-        if end_len > total_len {
+        if end_len > total_len 
+        {
             total_len = end_len;
         }
 
         rendered_tracks.push((samples, channels, sample_rate, offset_samples));
     }
 
+    if rendered_tracks.is_empty() 
+    {
+        return Err("Aucune piste exploitable pour l'export".into());
+    }
+
     let channels = reference_channels.unwrap();
     let sample_rate = reference_sample_rate.unwrap();
+    let channels_usize = channels as usize;
+    total_len = (total_len / channels_usize) * channels_usize;
 
     let mut mix_buffer = vec![0.0f32; total_len];
 
@@ -233,8 +314,10 @@ fn export_recorded_session(
 }
 fn export_recorded_session_to_default_folder(
     recording_state: &Arc<Mutex<RecordingState>>,
-) -> Result<PathBuf, std::boxed::Box<dyn std::error::Error>> {
+) -> Result<PathBuf, std::boxed::Box<dyn std::error::Error>> 
+{
     let events = get_recorded_events(recording_state);
+    let session_duration_secs = get_session_duration(recording_state);
 
     if events.is_empty() {
         return Err("Aucun événement enregistré".into());
@@ -247,7 +330,7 @@ fn export_recorded_session_to_default_folder(
 
     let output_path = folder.join("mix_session.wav");
 
-    export_recorded_session(&events, &output_path)?;
+    export_recorded_session(&events, session_duration_secs, &output_path)?;
 
     Ok(output_path)
 }
@@ -318,6 +401,7 @@ pub fn run() {
 pub fn create_main_window() -> Window {
     let settings = Settings::get_default().unwrap();
     settings.set_property_gtk_application_prefer_dark_theme(true);
+    load_recording_css();
 
     let window = Window::new(WindowType::Toplevel);
     window.set_title("MixRust - Professional DAW");
@@ -343,6 +427,7 @@ pub fn create_main_window() -> Window {
     let play_all_btn = ToolButton::new::<Button>(None, Some("PLAY ALL"));
     let mute_all_btn = ToolButton::new::<Button>(None, Some("MUTE ALL"));
     let rec_start_btn = ToolButton::new::<Button>(None, Some("REC START"));
+    rec_start_btn.set_widget_name("rec-start-recording");
     let rec_stop_btn = ToolButton::new::<Button>(None, Some("REC STOP"));
 
     toolbar.insert(&add_track_btn, -1);
@@ -376,20 +461,33 @@ pub fn create_main_window() -> Window {
     });
 
     let rec_state_start = Arc::clone(&recording_state);
+    let rec_start_btn_clone = rec_start_btn.clone();
     rec_start_btn.connect_clicked(move |_| {
-        start_recording_session(&rec_state_start);
-    });
+    start_recording_session(&rec_state_start);
+
+    let style_context = rec_start_btn_clone.get_style_context();
+    style_context.add_class("recording");
+
+    rec_start_btn_clone.set_label(Some("REC ●"));
+});
 
     let rec_state_stop = Arc::clone(&recording_state);
+    let rec_start_btn_stop = rec_start_btn.clone();
     rec_stop_btn.connect_clicked(move |_| {
-        stop_recording_session(&rec_state_stop);
-        print_recorded_events(&rec_state_stop);
+    stop_recording_session(&rec_state_stop);
 
-        match export_recorded_session_to_default_folder(&rec_state_stop) {
-            Ok(path) => println!("Mix exporté : {}", path.display()),
-            Err(e) => eprintln!("Erreur export session : {}", e),
-        }
-    });
+    let style_context = rec_start_btn_stop.get_style_context();
+    style_context.remove_class("recording");
+
+    rec_start_btn_stop.set_label(Some("REC START"));
+
+    print_recorded_events(&rec_state_stop);
+
+    match export_recorded_session_to_default_folder(&rec_state_stop) {
+        Ok(path) => println!("Mix exporté : {}", path.display()),
+        Err(e) => eprintln!("Erreur export session : {}", e),
+    }
+});
 
     let window_clone = window.clone();
     let handle_clone = handle.clone();

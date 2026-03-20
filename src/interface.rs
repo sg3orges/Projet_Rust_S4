@@ -13,6 +13,8 @@ use std::io::BufReader;
 use rodio::{Decoder, OutputStream, Sink, OutputStreamHandle, Source};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU32, AtomicBool, Ordering};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 use hound;
 use std::error::Error;
@@ -533,11 +535,15 @@ fn create_track_row(
     recording_state: &Arc<Mutex<RecordingState>>,
 ) {
     let track_box = Box::new(Orientation::Horizontal, 10);
+    let is_alive = Rc::new(Cell::new(true));
+    let mut sink_for_remove: Option<Arc<Mutex<Sink>>> = None;
 
     let restart_btn = Button::with_label("⏮");
     let play_btn = Button::with_label("▶");
     let mute_btn = Button::with_label("M");
     let save_btn = Button::with_label("Enregistrer");
+    let remove_btn = Button::with_label("✖");
+    remove_btn.set_tooltip_text(Some("Supprimer cette piste"));
 
     let vol_scale = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.1);
     vol_scale.set_value(1.0);
@@ -612,6 +618,7 @@ fn create_track_row(
     if let Some(h) = handle {
         if let Ok(sink) = Sink::try_new(h) {
             let sink_arc = Arc::new(Mutex::new(sink));
+            sink_for_remove = Some(Arc::clone(&sink_arc));
             all_sinks.lock().unwrap().push(Arc::clone(&sink_arc));
 
             let drawing_area = DrawingArea::new();
@@ -680,8 +687,11 @@ fn create_track_row(
             let playing_state = Arc::clone(&is_playing);
             let da_redraw = drawing_area.clone();
             let sc_speed_timer = speed_scale.clone();
-
+            let alive_flag = Rc::clone(&is_alive);
             glib::timeout_add_local(100, move || {
+                if !alive_flag.get() {
+                    return glib::Continue(false);
+                }
                 if *playing_state.lock().unwrap() {
                     let mut p = p_timer.lock().unwrap();
                     if *p < 1.0 {
@@ -894,11 +904,32 @@ fn create_track_row(
         }
     }
 
+    let all_sinks_remove = Arc::clone(all_sinks);
+    let track_box_remove = track_box.clone();
+    let container_remove = container.clone();
+    let alive_remove = Rc::clone(&is_alive);
+    let sink_remove = sink_for_remove.clone();
+
+    remove_btn.connect_clicked(move |_| {
+        alive_remove.set(false);
+
+        if let Some(ref sink_arc) = sink_remove {
+            let mut sinks = all_sinks_remove.lock().unwrap();
+            if let Some(pos) = sinks.iter().position(|s| Arc::ptr_eq(s, sink_arc)) {
+                let sink = sinks.remove(pos);
+                sink.lock().unwrap().stop();
+            }
+        }
+
+        container_remove.remove(&track_box_remove);
+    });
+
     let label = Label::new(Some(
         path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("audio"),
     ));
+    track_box.pack_start(&remove_btn, false, false, 2);
     track_box.pack_start(&label, false, false, 5);
 
     container.pack_start(&track_box, false, false, 5);

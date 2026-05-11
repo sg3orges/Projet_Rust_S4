@@ -425,7 +425,7 @@ pub fn create_main_window() -> Window {
     window.add(&main_vbox);
 
     let toolbar = Toolbar::new();
-    let add_track_btn = ToolButton::new::<Button>(None, Some("Add Track"));
+    let add_track_btn = ToolButton::new::<Button>(None, Some("Ajouter Piste"));
     let play_all_btn = ToolButton::new::<Button>(None, Some("PLAY ALL"));
     let mute_all_btn = ToolButton::new::<Button>(None, Some("MUTE ALL"));
     let rec_start_btn = ToolButton::new::<Button>(None, Some("REC START"));
@@ -439,9 +439,82 @@ pub fn create_main_window() -> Window {
     toolbar.insert(&rec_stop_btn, -1);
     main_vbox.pack_start(&toolbar, false, false, 0);
 
-    let all_sinks: Arc<Mutex<Vec<Arc<Mutex<Sink>>>>> = Arc::new(Mutex::new(Vec::new()));
+    // --- LE RUBAN ---
+    let ribbon_panel = Box::new(Orientation::Vertical, 5);
+    ribbon_panel.get_style_context().add_class("ribbon-panel");
+    
+    let ribbon_header = Label::new(Some("Veuillez sÃ©lectionner une piste en cliquant sur son graphique..."));
+    ribbon_header.get_style_context().add_class("track-label");
+    ribbon_panel.pack_start(&ribbon_header, false, false, 5);
+
+    let ribbon_controls = Box::new(Orientation::Horizontal, 20);
+    ribbon_controls.set_halign(gtk::Align::Center);
+
+    let mk_scale_box = |name: &str, scale: &Scale| -> Box {
+        let vbox = Box::new(Orientation::Vertical, 2);
+        let l = Label::new(Some(name));
+        l.get_style_context().add_class("control-label");
+        vbox.pack_start(&l, false, false, 0);
+        vbox.pack_start(scale, false, false, 0);
+        vbox
+    };
+
+    let r_scale_vol = Scale::with_range(Orientation::Horizontal, 0.0, 2.0, 0.1);
+    r_scale_vol.set_size_request(100, -1);
+    let r_scale_speed = Scale::with_range(Orientation::Horizontal, 0.25, 2.0, 0.05);
+    r_scale_speed.set_size_request(100, -1);
+    let r_scale_bass = Scale::with_range(Orientation::Horizontal, 0.0, 3.0, 0.1);
+    r_scale_bass.set_size_request(100, -1);
+
+    // BOUTONS D'EFFETS
+    let r_btn_apply_vol = Button::with_label("Appliquer Volume");
+    r_btn_apply_vol.get_style_context().add_class("btn-vol");
+    
+    let r_btn_apply_speed = Button::with_label("Appliquer Vitesse");
+    r_btn_apply_speed.get_style_context().add_class("btn-speed");
+
+    let r_btn_apply_bass = Button::with_label("Appliquer Basses");
+    r_btn_apply_bass.get_style_context().add_class("btn-bass");
+    
+    let r_btn_apply_disto = Button::with_label("Appliquer Distorsion");
+    r_btn_apply_disto.get_style_context().add_class("btn-disto");
+    
+    let r_btn_apply_reverb = Button::with_label("Appliquer Reverb");
+    r_btn_apply_reverb.get_style_context().add_class("btn-reverb");
+
+    // GROUPES DU RUBAN
+    let vol_group = Box::new(Orientation::Vertical, 2);
+    vol_group.pack_start(&mk_scale_box("Multiplicateur Volume", &r_scale_vol), false, false, 0);
+    vol_group.pack_start(&r_btn_apply_vol, false, false, 0);
+
+    let speed_group = Box::new(Orientation::Vertical, 2);
+    speed_group.pack_start(&mk_scale_box("Facteur Vitesse", &r_scale_speed), false, false, 0);
+    speed_group.pack_start(&r_btn_apply_speed, false, false, 0);
+
+    let bass_group = Box::new(Orientation::Vertical, 2);
+    bass_group.pack_start(&mk_scale_box("Niveau Basses", &r_scale_bass), false, false, 0);
+    bass_group.pack_start(&r_btn_apply_bass, false, false, 0);
+
+    let fx_group = Box::new(Orientation::Vertical, 5);
+    fx_group.set_valign(gtk::Align::End);
+    fx_group.pack_start(&r_btn_apply_disto, false, false, 0);
+    fx_group.pack_start(&r_btn_apply_reverb, false, false, 0);
+
+    ribbon_controls.pack_start(&vol_group, false, false, 0);
+    ribbon_controls.pack_start(&speed_group, false, false, 0);
+    ribbon_controls.pack_start(&bass_group, false, false, 0);
+    ribbon_controls.pack_start(&fx_group, false, false, 0);
+    
+    ribbon_panel.pack_start(&ribbon_controls, false, false, 5);
+    main_vbox.pack_start(&ribbon_panel, false, false, 0);
+
+    // --- ZONE DES PISTES ---
     let scroll = ScrolledWindow::new(None::<&Adjustment>, None::<&Adjustment>);
-    let track_container = Box::new(Orientation::Vertical, 5);
+    let track_container = Box::new(Orientation::Vertical, 10);
+    track_container.set_margin_top(15);
+    track_container.set_margin_bottom(15);
+    track_container.set_margin_start(15);
+    track_container.set_margin_end(15);
     scroll.add(&track_container);
     main_vbox.pack_start(&scroll, true, true, 0);
 
@@ -677,8 +750,21 @@ fn create_track_row(
 
             let c_motion = Arc::clone(&cursor_x);
             let da_motion = drawing_area.clone();
-            drawing_area.connect_motion_notify_event(move |_, event| {
-                *c_motion.lock().unwrap() = event.get_position().0;
+            let drag_flag_motion = Arc::clone(&is_dragging);
+            let start_pos_motion = Arc::clone(&drag_start);
+            let ew_motion = Arc::clone(&effect_window);
+            drawing_area.connect_motion_notify_event(move |da, event| {
+                let width = da.get_allocated_width() as f64;
+                let (x, _) = event.get_position();
+                let ratio = (x / width).clamp(0.0, 1.0);
+                *c_motion.lock().unwrap() = x;
+
+                if *drag_flag_motion.lock().unwrap() {
+                    let start = *start_pos_motion.lock().unwrap();
+                    let mut w = ew_motion.lock().unwrap();
+                    w.0 = start.min(ratio);
+                    w.1 = start.max(ratio);
+                }
                 da_motion.queue_draw();
                 Inhibit(false)
             });
@@ -716,6 +802,7 @@ fn create_track_row(
                 let mid_y = 40.0;
                 let p = *p_draw.lock().unwrap();
                 let c = *c_draw.lock().unwrap();
+                let w = *ew_draw.lock().unwrap();
 
                 for i in (0..600).step_by(4) {
                     let x = i as f64 * (width / 600.0);
@@ -901,6 +988,17 @@ fn create_track_row(
             track_box.pack_start(&reverb_btn, false, false, 2);
             track_box.pack_start(&save_btn, false, false, 2);
             track_box.pack_start(&drawing_area, true, true, 5);
+
+            let reg_select = track_registry.clone();
+            let act_select = active_track_id.clone();
+            let ribbon_clone = ribbon_ui.clone();
+            event_box.connect_button_press_event(move |_, _| {
+                act_select.set(Some(track_id));
+                if let Some(track) = reg_select.borrow().get(&track_id) {
+                    update_ribbon_from_state(&ribbon_clone, track);
+                }
+                Inhibit(false)
+            });
         }
     }
 

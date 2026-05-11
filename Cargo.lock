@@ -766,6 +766,7 @@ dependencies = [
  "glib",
  "gtk",
  "hound",
+ "pango",
  "rodio",
 ]
 

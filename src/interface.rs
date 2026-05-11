@@ -6,6 +6,7 @@ use gtk::{
     CssProvider, StyleContext, EventBox
 };
 use gdk::EventMask;
+use gdk::keys::constants as gdk_key;
 use glib; 
 use std::path::PathBuf;
 use std::fs::File;
@@ -266,6 +267,51 @@ fn apply_effect_to_track(track: &TrackState, effect: &str) {
 
     recompute_amps(&buf, &mut amps);
     drop(buf);
+    restart_playback_seamless(track, false);
+}
+
+// --- COUPER LE PASSAGE SÉLECTIONNÉ ET RECOLLER ---
+fn cut_selection(track: &TrackState) {
+    let window = *track.effect_window.lock().unwrap();
+    // Vérifier qu'il y a bien une sélection (pas toute la piste)
+    if window.0 <= 0.0 && window.1 >= 1.0 { return; }
+    if (window.1 - window.0) < 0.001 { return; }
+
+    let mut buf = track.audio_buffer.lock().unwrap();
+    let mut amps = track.amplitudes.lock().unwrap();
+    let mut colors = track.colors.lock().unwrap();
+
+    let total = buf.len();
+    let c = track.channels as usize;
+    if c == 0 || total == 0 { return; }
+
+    let mut start = (window.0 * total as f64) as usize;
+    let mut end   = (window.1 * total as f64) as usize;
+    // Aligner sur les frontières de frames
+    start = (start / c) * c;
+    end   = (end   / c) * c;
+    end   = end.min(total);
+    if start >= end { return; }
+
+    // Supprimer la plage [start..end] — les deux bouts se recollent automatiquement
+    buf.drain(start..end);
+
+    // Recalculer durée et nombre de samples
+    let new_total = buf.len();
+    track.total_samples.set(new_total);
+    track.total_duration_secs.set(
+        new_total as f64 / (track.sample_rate as f64 * c as f64)
+    );
+
+    // Réinitialiser les couleurs à la valeur par défaut et recalculer les amplitudes
+    for col in colors.iter_mut() { *col = (0.31, 0.76, 0.96); }
+    recompute_amps(&buf, &mut amps);
+
+    // Remettre la fenêtre de sélection à « tout sélectionné » (pas de sélection)
+    drop(buf);
+    *track.effect_window.lock().unwrap() = (0.0, 1.0);
+
+    println!("Coupe effectuée : {} samples supprimés, {} samples restants", end - start, new_total);
     restart_playback_seamless(track, false);
 }
 
@@ -592,6 +638,9 @@ pub fn create_main_window() -> Window {
     let window_clone = window.clone();
     let handle_clone = handle.clone();
     let ribbon_ui_clone = ribbon_ui.clone();
+    // Clones pour le raccourci clavier C (avant le move dans add_track_btn)
+    let reg_cut = track_registry.clone();
+    let act_cut = active_track_id.clone();
     
     add_track_btn.connect_clicked(move |_| {
         let dialog = FileChooserDialog::with_buttons(
@@ -607,6 +656,19 @@ pub fn create_main_window() -> Window {
             }
         }
         dialog.close();
+    });
+
+    // --- RACCOURCI CLAVIER C : Couper la sélection ---
+    window.add_events(EventMask::KEY_PRESS_MASK);
+    window.connect_key_press_event(move |_, event| {
+        if event.get_keyval() == gdk_key::c || event.get_keyval() == gdk_key::C {
+            if let Some(id) = act_cut.get() {
+                if let Some(track) = reg_cut.borrow().get(&id) {
+                    cut_selection(track);
+                }
+            }
+        }
+        Inhibit(false)
     });
 
     window.connect_delete_event(|_, _| { gtk::main_quit(); Inhibit(false) });
@@ -734,7 +796,7 @@ fn create_track_row(
             playback_hbox.pack_start(&mute_btn, false, false, 0);
             playback_hbox.pack_start(&export_btn, false, false, 0);
 
-            let help_label = Label::new(Some("Clic G : Seek\nGlisser : Sélect.\nClic D : Annuler"));
+            let help_label = Label::new(Some("Clic G : Seek\nGlisser : Sélect.\nClic D : Annuler\nC : Couper sélec."));
             help_label.get_style_context().add_class("control-label");
 
             info_box.pack_start(&header_hbox, false, false, 0);

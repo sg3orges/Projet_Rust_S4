@@ -1,7 +1,8 @@
-// Déclare le module interface.rs
+// Déclare les modules
 mod interface;
+mod accueil;
 
 fn main() {
-    // Appelle la fonction de lancement de l'interface
-    interface::run();
+    // Lance l'écran d'accueil puis, via bouton, l'interface principale
+    accueil::run();
 }

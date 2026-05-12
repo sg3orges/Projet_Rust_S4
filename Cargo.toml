@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 gtk = { version = "0.9", features = ["v3_24"] }
+cairo-rs = "0.9"
 gdk = "0.13"
 pango = "0.9"
 glib = "0.10"

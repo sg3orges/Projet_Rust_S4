@@ -16,6 +16,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use gdk::keys::constants as gdk_keys;
+use gdk::ModifierType;
+use glib::ObjectExt;
+
 const TRACK_HEIGHT: f64 = 86.0;
 const HEADER_WIDTH: f64 = 170.0;
 const RULER_HEIGHT: f64 = 28.0;
@@ -501,12 +505,12 @@ pub fn create_main_window() -> Window {
     window.add(&main_vbox);
 
     let toolbar = Toolbar::new();
-    let add_clip_btn = ToolButton::new::<Button>(None, Some("Ajouter Clip"));
-    let play_btn = ToolButton::new::<Button>(None, Some("PLAY"));
+    let add_clip_btn = ToolButton::new::<Button>(None, Some("Ajouter Clip (Ctrl+O)"));
+    let play_btn = ToolButton::new::<Button>(None, Some("PLAY/PAUSE (Espace)"));
     let stop_btn = ToolButton::new::<Button>(None, Some("STOP"));
-    let export_btn = ToolButton::new::<Button>(None, Some("EXPORT MIX"));
-    let zoom_in_btn = ToolButton::new::<Button>(None, Some("ZOOM +"));
-    let zoom_out_btn = ToolButton::new::<Button>(None, Some("ZOOM -"));
+    let export_btn = ToolButton::new::<Button>(None, Some("EXPORT MIX (Ctrl+E)"));
+    let zoom_in_btn = ToolButton::new::<Button>(None, Some("ZOOM + (+)"));
+    let zoom_out_btn = ToolButton::new::<Button>(None, Some("ZOOM - (-)"));
 
     toolbar.insert(&add_clip_btn, -1);
     toolbar.insert(&play_btn, -1);
@@ -544,13 +548,13 @@ pub fn create_main_window() -> Window {
     scale_bass.set_value(1.0);
     scale_bass.set_size_request(110, -1);
 
-    let btn_apply_vol = Button::with_label("Appliquer Volume");
-    let btn_apply_speed = Button::with_label("Appliquer Vitesse");
-    let btn_apply_bass = Button::with_label("Appliquer Basses");
-    let btn_apply_disto = Button::with_label("Appliquer Distorsion");
-    let btn_apply_reverb = Button::with_label("Appliquer Reverb");
-    let btn_cut = Button::with_label("Couper sélection");
-    let btn_delete_after_cursor = Button::with_label("Suppr après curseur");
+    let btn_apply_vol = Button::with_label("Appliquer Volume (V)");
+    let btn_apply_speed = Button::with_label("Appliquer Vitesse (S)");
+    let btn_apply_bass = Button::with_label("Appliquer Basses (B)");
+    let btn_apply_disto = Button::with_label("Appliquer Distorsion (D)");
+    let btn_apply_reverb = Button::with_label("Appliquer Reverb (R)");
+    let btn_cut = Button::with_label("Couper sélection (Suppr)");
+    let btn_delete_after_cursor = Button::with_label("Suppr après curseur (Maj+Suppr)");
 
     for btn in [
         &btn_apply_vol,
@@ -945,12 +949,83 @@ pub fn create_main_window() -> Window {
         glib::Continue(true)
     });
 
-    window.connect_delete_event(|_, _| {
-        gtk::main_quit();
-        Inhibit(false)
-    });
+        let add_clip_btn_k = add_clip_btn.clone();
+        let play_btn_k = play_btn.clone();
+        let stop_btn_k = stop_btn.clone();
+        let export_btn_k = export_btn.clone();
+        let zoom_in_btn_k = zoom_in_btn.clone();
+        let zoom_out_btn_k = zoom_out_btn.clone();
+    
+        let btn_cut_k = btn_cut.clone();
+        let btn_delete_after_cursor_k = btn_delete_after_cursor.clone();
+    
+        let btn_apply_vol_k = btn_apply_vol.clone();
+        let btn_apply_speed_k = btn_apply_speed.clone();
+        let btn_apply_bass_k = btn_apply_bass.clone();
+        let btn_apply_disto_k = btn_apply_disto.clone();
+        let btn_apply_reverb_k = btn_apply_reverb.clone();
 
-    window
+        let timeline_k = Rc::clone(&timeline);
+        let drawing_k = drawing_area.clone();
+        let update_label_k = Rc::clone(&update_label);
+
+        window.connect_key_press_event(move |_, key| {
+            let keyval = key.get_keyval();
+            let state = key.get_state();
+            let ctrl_pressed = state.contains(ModifierType::CONTROL_MASK);
+            let shift_pressed = state.contains(ModifierType::SHIFT_MASK);
+
+            match keyval {
+                gdk_keys::space => {
+                    let is_playing = timeline_k.borrow().is_playing;
+                    if is_playing {
+                        stop_btn_k.emit_by_name::<()>("clicked", &[]);
+                    } else {
+                        play_btn_k.emit_by_name::<()>("clicked", &[]);
+                    }
+                }
+                gdk_keys::Delete | gdk_keys::BackSpace => {
+                    if shift_pressed {
+                        btn_delete_after_cursor_k.clicked();
+                    } else {
+                        btn_cut_k.clicked();
+                    }
+                }
+                gdk_keys::Escape => {
+                    let mut tl = timeline_k.borrow_mut();
+                    if let Some(clip) = tl.selected_clip_mut() {
+                        clip.selection = None;
+                    }
+                    tl.mouse_mode = MouseMode::None;
+                    tl.drag_clip_id = None;
+                    update_label_k();
+                    drawing_k.queue_draw();
+                }
+                gdk_keys::plus | gdk_keys::KP_Add => zoom_in_btn_k.emit_by_name::<()>("clicked", &[]),
+                gdk_keys::minus | gdk_keys::KP_Subtract => zoom_out_btn_k.emit_by_name::<()>("clicked", &[]),
+                gdk_keys::o | gdk_keys::O if ctrl_pressed => {
+                    add_clip_btn_k.emit_by_name::<()>("clicked", &[]);
+                }
+                gdk_keys::e | gdk_keys::E if ctrl_pressed => {
+                    export_btn_k.emit_by_name::<()>("clicked", &[]);
+                }
+                gdk_keys::v | gdk_keys::V => btn_apply_vol_k.clicked(),
+                gdk_keys::s | gdk_keys::S => btn_apply_speed_k.clicked(),
+                gdk_keys::b | gdk_keys::B => btn_apply_bass_k.clicked(),
+                gdk_keys::d | gdk_keys::D => btn_apply_disto_k.clicked(),
+                gdk_keys::r | gdk_keys::R => btn_apply_reverb_k.clicked(),
+                _ => return Inhibit(false), 
+            }
+            Inhibit(true) 
+        });
+
+        window.connect_delete_event(|_, _| {
+            gtk::main_quit();
+            Inhibit(false)
+        });
+
+        window
+    }
 }
 
 fn draw_ruler(cr: &cairo::Context, state: &TimelineState, width: f64) {

@@ -979,9 +979,9 @@ pub fn create_main_window() -> Window {
                 gdk_keys::space => {
                     let is_playing = timeline_k.borrow().is_playing;
                     if is_playing {
-                        stop_btn_k.emit_by_name::<()>("clicked", &[]);
+                        let _ = stop_btn_k.emit("clicked", &[]);
                     } else {
-                        play_btn_k.emit_by_name::<()>("clicked", &[]);
+                        let _ = play_btn_k.emit("clicked", &[]);
                     }
                 }
                 gdk_keys::Delete | gdk_keys::BackSpace => {
@@ -1001,13 +1001,13 @@ pub fn create_main_window() -> Window {
                     update_label_k();
                     drawing_k.queue_draw();
                 }
-                gdk_keys::plus | gdk_keys::KP_Add => zoom_in_btn_k.emit_by_name::<()>("clicked", &[]),
-                gdk_keys::minus | gdk_keys::KP_Subtract => zoom_out_btn_k.emit_by_name::<()>("clicked", &[]),
+                gdk_keys::plus | gdk_keys::KP_Add => { let _ = zoom_in_btn_k.emit("clicked", &[]); },
+                gdk_keys::minus | gdk_keys::KP_Subtract => { let _ = zoom_out_btn_k.emit("clicked", &[]); },
                 gdk_keys::o | gdk_keys::O if ctrl_pressed => {
-                    add_clip_btn_k.emit_by_name::<()>("clicked", &[]);
+                    let _ = add_clip_btn_k.emit("clicked", &[]);
                 }
                 gdk_keys::e | gdk_keys::E if ctrl_pressed => {
-                    export_btn_k.emit_by_name::<()>("clicked", &[]);
+                    let _ = export_btn_k.emit("clicked", &[]);
                 }
                 gdk_keys::v | gdk_keys::V => btn_apply_vol_k.clicked(),
                 gdk_keys::s | gdk_keys::S => btn_apply_speed_k.clicked(),
@@ -1025,7 +1025,6 @@ pub fn create_main_window() -> Window {
         });
 
         window
-    }
 }
 
 fn draw_ruler(cr: &cairo::Context, state: &TimelineState, width: f64) {

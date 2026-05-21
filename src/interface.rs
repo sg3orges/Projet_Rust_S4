@@ -13,9 +13,10 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use gdk::keys::constants as gdk_keys;
 use gdk::ModifierType;
 use glib::ObjectExt;
@@ -231,12 +232,9 @@ impl TimelineState {
         self.clips.iter().find(|clip| clip.id == id)
     }
 
-    /// Duplicate the selected clip onto the first free lane after the original.
-    /// Returns the new clip's id on success.
     fn duplicate_selected_clip(&mut self) -> Option<u32> {
         let original = self.selected_clip()?.clone();
 
-        // Find the first lane (other than the original) where the clip fits.
         let new_lane = {
             let start = original.start_time_secs;
             let end   = original.end_time_secs();
@@ -569,6 +567,9 @@ pub fn create_main_window() -> Window {
     toolbar.insert(&export_btn, -1);
     toolbar.insert(&zoom_in_btn, -1);
     toolbar.insert(&zoom_out_btn, -1);
+
+    let record_btn = ToolButton::new::<Button>(None, Some("🔴 Enregistrer (Micro)"));
+    toolbar.insert(&record_btn, -1);
     main_vbox.pack_start(&toolbar, false, false, 0);
 
     let ribbon = GtkBox::new(Orientation::Vertical, 6);
@@ -1014,6 +1015,171 @@ pub fn create_main_window() -> Window {
         }
         glib::Continue(true)
     });
+
+    type RecordResult = Option<(Vec<f32>, u32, u16)>;
+    let rec_mailbox: Arc<Mutex<RecordResult>> = Arc::new(Mutex::new(None));
+
+    let recording_stop: Rc<RefCell<Option<std::sync::mpsc::SyncSender<()>>>> =
+        Rc::new(RefCell::new(None));
+
+    let mailbox_poll   = Arc::clone(&rec_mailbox);
+    let timeline_poll  = Rc::clone(&timeline);
+    let drawing_poll   = drawing_area.clone();
+    let update_poll    = Rc::clone(&update_label);
+    let record_btn_poll = record_btn.clone();
+    glib::timeout_add_local(100, move || {
+        let mut slot = mailbox_poll.lock().unwrap();
+        if let Some((buffer, sample_rate, channels)) = slot.take() {
+            drop(slot); // libérer le verrou avant de travailler
+
+            let amplitudes = compute_amplitudes(&buffer, 900);
+            let duration_secs =
+                buffer.len() as f64 / (sample_rate as f64 * channels as f64);
+
+            let mut state = timeline_poll.borrow_mut();
+            let lane = state.first_free_lane_at_playhead(duration_secs);
+            state.lanes = state.lanes.max(lane + 1);
+
+            let colors = [
+                (0.20, 0.74, 0.95), (1.00, 0.55, 0.18),
+                (0.60, 0.82, 0.20), (0.94, 0.27, 0.38),
+                (0.70, 0.45, 0.95), (0.95, 0.80, 0.20),
+            ];
+            let new_id = state.next_clip_id;
+            let color  = colors[(new_id as usize - 1) % colors.len()];
+            let playhead = state.playhead_secs;
+
+            state.clips.push(AudioClip {
+                id: new_id,
+                lane,
+                name: format!("Micro {new_id}"),
+                path: PathBuf::from(""),
+                buffer,
+                amplitudes,
+                channels,
+                sample_rate,
+                start_time_secs: playhead,
+                offset_in_audio_secs: 0.0,
+                duration_secs,
+                volume: 1.0,
+                speed: 1.0,
+                bass_gain: 1.0,
+                selection: None,
+                color,
+                effect_zones: Vec::new(),
+            });
+            state.selected_clip_id = Some(new_id);
+            state.next_clip_id += 1;
+            drop(state);
+
+            update_poll();
+            drawing_poll.queue_draw();
+            record_btn_poll.set_label(Some("🔴 Enregistrer (Micro)"));
+        }
+        glib::Continue(true)
+    });
+
+    let rec_stop_clone = Rc::clone(&recording_stop);
+    let mailbox_btn    = Arc::clone(&rec_mailbox);
+    record_btn.connect_clicked(move |btn| {
+        let mut stop_opt = rec_stop_clone.borrow_mut();
+
+        if let Some(sender) = stop_opt.take() {
+            let _ = sender.send(());
+            btn.set_label(Some("🔴 Enregistrer (Micro)"));
+        } else {
+            btn.set_label(Some("⏹ Arrêter enregistrement"));
+
+            let host   = cpal::default_host();
+            let device = match host.default_input_device() {
+                Some(d) => d,
+                None => {
+                    eprintln!("Aucun microphone disponible");
+                    btn.set_label(Some("🔴 Enregistrer (Micro)"));
+                    return;
+                }
+            };
+
+            let config = match device.default_input_config() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Config micro invalide: {e}");
+                    btn.set_label(Some("🔴 Enregistrer (Micro)"));
+                    return;
+                }
+            };
+
+            let sample_rate = config.sample_rate().0;
+            let channels    = config.channels();
+
+            let samples_shared: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+            let samples_write  = Arc::clone(&samples_shared);
+
+            let (tx, rx) = std::sync::mpsc::sync_channel::<()>(1);
+            *stop_opt = Some(tx);
+
+            let mailbox2 = Arc::clone(&mailbox_btn);
+
+            std::thread::spawn(move || {
+                let err_fn = |e| eprintln!("Erreur stream micro: {e}");
+
+                let stream = match config.sample_format() {
+                    cpal::SampleFormat::F32 => {
+                        let sw = Arc::clone(&samples_write);
+                        device.build_input_stream(
+                            &config.into(),
+                            move |data: &[f32], _| {
+                                sw.lock().unwrap().extend_from_slice(data);
+                            },
+                            err_fn, None,
+                        )
+                    }
+                    cpal::SampleFormat::I16 => {
+                        let sw = Arc::clone(&samples_write);
+                        device.build_input_stream(
+                            &config.into(),
+                            move |data: &[i16], _| {
+                                sw.lock().unwrap()
+                                  .extend(data.iter().map(|&s| s as f32 / i16::MAX as f32));
+                            },
+                            err_fn, None,
+                        )
+                    }
+                    cpal::SampleFormat::U16 => {
+                        let sw = Arc::clone(&samples_write);
+                        device.build_input_stream(
+                            &config.into(),
+                            move |data: &[u16], _| {
+                                sw.lock().unwrap().extend(data.iter().map(|&s| {
+                                    (s as f32 / u16::MAX as f32) * 2.0 - 1.0
+                                }));
+                            },
+                            err_fn, None,
+                        )
+                    }
+                    _ => { eprintln!("Format micro non supporté"); return; }
+                };
+
+                let stream = match stream {
+                    Ok(s)  => s,
+                    Err(e) => { eprintln!("Impossible d'ouvrir le micro: {e}"); return; }
+                };
+
+                let _ = stream.play();
+                let _ = rx.recv(); // Attendre le signal d'arrêt
+                drop(stream);
+
+                let buffer: Vec<f32> = samples_shared.lock().unwrap().clone();
+                if buffer.is_empty() {
+                    eprintln!("Enregistrement vide");
+                    return;
+                }
+
+                *mailbox2.lock().unwrap() = Some((buffer, sample_rate, channels));
+            });
+        }
+    });
+
 
         let add_clip_btn_k = add_clip_btn.clone();
         let play_btn_k = play_btn.clone();

@@ -230,6 +230,57 @@ impl TimelineState {
         let id = self.selected_clip_id?;
         self.clips.iter().find(|clip| clip.id == id)
     }
+
+    /// Duplicate the selected clip onto the first free lane after the original.
+    /// Returns the new clip's id on success.
+    fn duplicate_selected_clip(&mut self) -> Option<u32> {
+        let original = self.selected_clip()?.clone();
+
+        // Find the first lane (other than the original) where the clip fits.
+        let new_lane = {
+            let start = original.start_time_secs;
+            let end   = original.end_time_secs();
+            let mut found = None;
+            for lane in 0..=self.lanes {
+                if lane == original.lane {
+                    continue;
+                }
+                let occupied = self.clips.iter().any(|c| {
+                    c.lane == lane && start < c.end_time_secs() && end > c.start_time_secs
+                });
+                if !occupied {
+                    found = Some(lane);
+                    break;
+                }
+            }
+            found.unwrap_or(self.lanes)
+        };
+
+        self.lanes = self.lanes.max(new_lane + 1);
+
+        let new_id = self.next_clip_id;
+        self.next_clip_id += 1;
+
+        let colors = [
+            (0.20, 0.74, 0.95),
+            (1.00, 0.55, 0.18),
+            (0.60, 0.82, 0.20),
+            (0.94, 0.27, 0.38),
+            (0.70, 0.45, 0.95),
+            (0.95, 0.80, 0.20),
+        ];
+        let new_color = colors[(new_id as usize - 1) % colors.len()];
+
+        let mut dup = original.clone();
+        dup.id    = new_id;
+        dup.lane  = new_lane;
+        dup.color = new_color;
+        dup.selection = None;
+
+        self.clips.push(dup);
+        self.selected_clip_id = Some(new_id);
+        Some(new_id)
+    }
 }
 
 fn snap_time(value: f64, grid: f64) -> f64 {
@@ -555,6 +606,7 @@ pub fn create_main_window() -> Window {
     let btn_apply_reverb = Button::with_label("Appliquer Reverb (R)");
     let btn_cut = Button::with_label("Couper sélection (Suppr)");
     let btn_delete_after_cursor = Button::with_label("Suppr après curseur (Maj+Suppr)");
+    let btn_duplicate = Button::with_label("Dupliquer sur nouvelle piste (Ctrl+C)");
 
     for btn in [
         &btn_apply_vol,
@@ -564,6 +616,7 @@ pub fn create_main_window() -> Window {
         &btn_apply_reverb,
         &btn_cut,
         &btn_delete_after_cursor,
+        &btn_duplicate,
     ] {
         btn.get_style_context().add_class("fx-btn");
     }
@@ -579,7 +632,6 @@ pub fn create_main_window() -> Window {
     fx_row.pack_start(&btn_apply_bass, false, false, 0);
     fx_row.pack_start(&btn_apply_disto, false, false, 0);
     fx_row.pack_start(&btn_apply_reverb, false, false, 0);
-    fx_row.pack_start(&btn_cut, false, false, 0);
     fx_row.pack_start(&btn_delete_after_cursor, false, false, 0);
 
     ribbon.pack_start(&fx_row, false, false, 3);
@@ -722,6 +774,20 @@ pub fn create_main_window() -> Window {
 
         update_label_delete();
         drawing_delete.queue_draw();
+    });
+
+    let timeline_dup = Rc::clone(&timeline);
+    let drawing_dup = drawing_area.clone();
+    let update_label_dup = Rc::clone(&update_label);
+    btn_duplicate.connect_clicked(move |_| {
+        {
+            let mut state = timeline_dup.borrow_mut();
+            if state.duplicate_selected_clip().is_none() {
+                eprintln!("Duplication : aucun clip sélectionné");
+            }
+        }
+        update_label_dup();
+        drawing_dup.queue_draw();
     });
 
     let timeline_for_zoom_in = Rc::clone(&timeline);
@@ -958,6 +1024,7 @@ pub fn create_main_window() -> Window {
     
         let btn_cut_k = btn_cut.clone();
         let btn_delete_after_cursor_k = btn_delete_after_cursor.clone();
+        let btn_duplicate_k = btn_duplicate.clone();
     
         let btn_apply_vol_k = btn_apply_vol.clone();
         let btn_apply_speed_k = btn_apply_speed.clone();
@@ -1008,6 +1075,9 @@ pub fn create_main_window() -> Window {
                 }
                 gdk_keys::e | gdk_keys::E if ctrl_pressed => {
                     let _ = export_btn_k.emit("clicked", &[]);
+                }
+                gdk_keys::c | gdk_keys::C if ctrl_pressed => {
+                    btn_duplicate_k.clicked();
                 }
                 gdk_keys::v | gdk_keys::V => btn_apply_vol_k.clicked(),
                 gdk_keys::s | gdk_keys::S => btn_apply_speed_k.clicked(),
